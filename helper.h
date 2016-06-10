@@ -8,16 +8,13 @@
 class  CHttpSect
 {
 public:
-	// CString  szProxyAddr;     // 理服务器地址.
-	CString  szHostAddr;      // Host地址.
-	// int      nProxyPort;      // 代理服务端口号.
-	int      nHostPort;       // Host端口号.
-	CString  szHttpAddr;      // Http文件地址.
-	CString  szHttpFilename;  // Http文件名.
-	CString  szDesFilename;   // 下载后的文件名.
-	DWORD    nStart;          // 分割的起始位置.
-	DWORD    nEnd;            // 分割的起始位置.
-	// DWORD    bProxyMode;      // 下载模态. 
+	CString  szHostAddr;      // Host address
+	int      nHostPort;       // Host port
+	CString  szHttpAddr;      // Http file address
+	CString  szHttpFilename;  // Http filename
+	CString  szDesFilename;   // downloaded filename
+	DWORD    nStart;          // start of segment
+	DWORD    nEnd;            // end of segment
 };
 
 class  CHttpGet
@@ -70,8 +67,6 @@ bool MyDownload(CString strUrl,
 	CString strWriteFileName,
 	//unsigned long *& downloaded,
 	unsigned long & totalSize
-//	CString strProxy = "",
-//	int nProxyPort = 8080,
 //	int nThread = 5
 	);
 
