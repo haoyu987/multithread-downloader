@@ -3,7 +3,10 @@
 using namespace std;
 
 unsigned long rdownloaded = 0;
+int CHttpGet::m_nCount;
 DWORD CHttpGet::m_nFileLength = 0;
+
+// parseURL and get the host address, file path and filename.
 void ParseURL(CString URL, CString &host, CString &path, CString &filename)
 {
 	URL.TrimLeft();
@@ -23,14 +26,12 @@ void ParseURL(CString URL, CString &host, CString &path, CString &filename)
 	filename = str.Right(str.GetLength() - m - 1);
 }
 
-bool MyDownload(CString strUrl,
+bool DownloadHelper(CString strUrl,
 	CString strWriteFileName,
-//	unsigned long *& downloaded,
-	unsigned long & totalSize
-//	CString strProxy,
-//	int nProxyPort,
-//	int nThread
-	)
+	unsigned long *& downloaded,
+	unsigned long & totalSize,
+	int nThread
+)
 {
 	CHttpGet b;
 	CString strHostAddr;
@@ -38,17 +39,13 @@ bool MyDownload(CString strUrl,
 	CString strHttpFilename;
 
 	//monitor the downloaded data
-//	downloaded = &rdownloaded;
+	downloaded = &rdownloaded;
 
 	ParseURL(strUrl, strHostAddr, strHttpAddr, strHttpFilename);
-	printf("%s\n%s\n",strHttpAddr, strHttpFilename);
+	printf("\nDownload %s\nFrom %s\n", strHttpFilename, strHttpAddr);
 	strWriteFileName += strHttpFilename;
 
-	//cout << strHostAddr.GetBuffer(strHostAddr.GetLength()) << endl;
-	//cout << strHttpAddr.GetBuffer(strHttpAddr.GetLength()) << endl;
-	//cout << strHttpFilename.GetBuffer(strHttpFilename.GetLength()) << endl;
-	printf("Before downloading.");
-	if (!b.HttpDownLoad(strHostAddr, strHttpAddr, strHttpFilename, strWriteFileName,totalSize))
+	if (!b.HttpDownLoad(strHostAddr, strHttpAddr, strHttpFilename, strWriteFileName, nThread, totalSize))
 		return false;
 	return true;
 }
@@ -70,42 +67,159 @@ BOOL CHttpGet::HttpDownLoad(
 	CString strHttpAddr,
 	CString strHttpFilename,
 	CString strWriteFileName,
-	// int nSectNum,
+	int nSectNum,
 	DWORD &totalSize)
 {
+	ASSERT(nSectNum>0 && nSectNum <= 50);
 	int nHostPort = 80;
 
 	SOCKET hSocket;
-	sectinfo = new CHttpSect;              // allocate memory for information structure
 	hSocket = ConnectHttp(strHostAddr, nHostPort);
-	if (hSocket == INVALID_SOCKET) return 1;
-	// send Http header, get content size
+	if (hSocket == INVALID_SOCKET) return TRUE;
 
-	SendHttpHeader(hSocket, strHostAddr, strHttpAddr, strHttpFilename, 0);
+	// send Http header, get content length
+	if(!SendHttpHeader(hSocket, strHostAddr, strHttpAddr, strHttpFilename, 0,0))
+		printf("File request failed.");
+	closesocket(hSocket);
+
 	totalSize = CHttpGet::m_nFileLength;
-	DWORD nLen;
-	DWORD nSumLen = 0;
-	char szBuffer[1024];
 
-	printf("send http header.\n");
+	m_nCount = 0;                                    // reset the counter.
+	sectinfo = new CHttpSect[nSectNum];              // set memory for http info.
+	DWORD nSize = m_nFileLength / nSectNum;          // calculate the length for a single section.
+
+	int i;
+	// No more than 50 threads are allowed.
+	CWinThread* pthread[50];
+	for (i = 0; i<nSectNum; i++)
+	{
+		sectinfo[i].szHostAddr = strHostAddr;        
+		sectinfo[i].nHostPort = nHostPort;		     
+		sectinfo[i].szHttpAddr = strHttpAddr;        
+		sectinfo[i].szHttpFilename = strHttpFilename;
+
+
+		// Indexing the temporary files.
+		CString strTempFileName;
+		strTempFileName.Format("%s_%d", strWriteFileName, i);
+		sectinfo[i].szDesFilename = strTempFileName;   // Saved file name.
+
+		if (i<nSectNum - 1) {
+			sectinfo[i].nStart = i*nSize;              // downloading start point.
+			sectinfo[i].nEnd = (i + 1)*nSize;          // downloading end point
+		}
+		else {
+			sectinfo[i].nStart = i*nSize;              // start point of the last section
+			sectinfo[i].nEnd = m_nFileLength;          // end point of the last section
+		}
+		pthread[i] = AfxBeginThread(ThreadDownLoad, &sectinfo[i]);
+
+	}
+
+	HANDLE hThread[50];
+	for (int ii = 0; ii < nSectNum; ii++)
+		hThread[ii] = pthread[ii]->m_hThread;
+
+	// wait for all downloading threads to terminate.
+	WaitForMultipleObjects(nSectNum, hThread, TRUE, INFINITE);
+
+	// if unfinished return false and reconnect.
+	if (m_nCount != nSectNum)
+		return FALSE;
+	else
+		rdownloaded = totalSize;
 
 	FILE *fpwrite;
 	errno_t err;
-	// open file writing
-	printf("%s\n", strWriteFileName);
+
+	// open file writing.
 	if ((err = fopen_s(&fpwrite, strWriteFileName, "w+b")) != 0) {
 		TRACE("File open error!\n");
 		return FALSE;
 	}
 
-	printf("File Open OK! totalSize %d",totalSize);
+	for (i = 0; i<nSectNum; i++) {
+		FileCombine(&sectinfo[i], fpwrite);
+	}
 
-	while (1)
+	fclose(fpwrite);
+
+	delete[] sectinfo;
+
+	return TRUE;
+}
+
+//---------------------------------------------------------------------------
+BOOL CHttpGet::FileCombine(CHttpSect *pInfo, FILE *fpwrite)
+{
+	FILE *fpread;
+	errno_t err;
+
+	// open file reading.
+	if ((err = fopen_s(&fpread, pInfo->szDesFilename, "r+b")) != 0) {
+		printf("%s open failed.\n", pInfo->szDesFilename);
+		return FALSE;
+	}
+
+	DWORD nPos = pInfo->nStart;
+
+	// set the start point
+	fseek(fpwrite, nPos, SEEK_SET);
+
+	int c;
+	// write the data into file
+	while ((c = fgetc(fpread)) != EOF)
 	{
-		if (nSumLen >= totalSize) break;
+		fputc(c, fpwrite);
+		nPos++;
+		if (nPos == pInfo->nEnd) break;
+	}
+
+	fclose(fpread);
+	DeleteFile(pInfo->szDesFilename);
+
+	return TRUE;
+}
+
+//---------------------------------------------------------------------------
+UINT CHttpGet::ThreadDownLoad(void* pParam)
+{
+	CHttpSect *pInfo = (CHttpSect*)pParam;
+	SOCKET hSocket;
+
+	hSocket = ConnectHttp(pInfo->szHostAddr, pInfo->nHostPort);
+	if (hSocket == INVALID_SOCKET) return 1;
+
+	// calculate the size of temporary file so downloading can resume after break.
+	DWORD nFileSize = myfile.GetFileSizeByName(pInfo->szDesFilename);
+	DWORD nSectSize = (pInfo->nEnd) - (pInfo->nStart);
+
+	// this file has finished downloading.
+	if (nFileSize >= nSectSize) {
+		CHttpGet::m_nCount++;  // increase the counter.
+		return 0;
+	}
+
+	FILE *fpwrite = myfile.GetFilePointer(pInfo->szDesFilename);
+	if (!fpwrite) return 1;
+
+	// set the content range and send http request.
+	SendHttpHeader(hSocket, pInfo->szHostAddr, pInfo->szHttpAddr,
+		pInfo->szHttpFilename, pInfo->nStart + nFileSize, pInfo->nEnd);
+
+	// set the start point.
+	fseek(fpwrite, nFileSize, SEEK_SET);
+
+	DWORD nLen;
+	DWORD nSumLen = 0;
+	char szBuffer[1024];
+
+	do
+	{
+		if (nSumLen >= nSectSize - nFileSize) break;
 		nLen = recv(hSocket, szBuffer, sizeof(szBuffer), 0);
 
-		// atomic operation.
+		//asynchronized atom operation.
 		rdownloaded += nLen;
 
 		if (nLen == SOCKET_ERROR) {
@@ -114,37 +228,16 @@ BOOL CHttpGet::HttpDownLoad(
 			return 1;
 		}
 
-		if (nLen == 0) break;
 		nSumLen += nLen;
-		TRACE("%d\n", nLen);
 
-		// writing	
+		// write the data in buffer into the file.		
 		fwrite(szBuffer, nLen, 1, fpwrite);
-	}
+	} while (nLen > 0);
 
-	fclose(fpwrite);      // close file writing
-	closesocket(hSocket);
-
-	//totalSize = CHttpGet::m_nFileLength;
-
-	//// sectinfo[i].szProxyAddr = strProxyAddr;      // proxy
-	//// sectinfo[i].nProxyPort = nProxyPort;		   // Host address
-	//sectinfo[0].szHostAddr = strHostAddr;       // Http file address
-	//sectinfo[0].nHostPort = nHostPort;		   // Http file name
-	//sectinfo[0].szHttpAddr = strHttpAddr;       // proxy port number
-	//sectinfo[0].szHttpFilename = strHttpFilename;// Host port number
-
-	//CString strTempFileName;
-	//strTempFileName.Format("%s_%d", strWriteFileName, 0);
-	//sectinfo[0].szDesFilename = strTempFileName;
-	//// sectinfo[i].bProxyMode = bProxy;		       // mode
-	//sectinfo[0].nStart = 0;
-	//sectinfo[0].nEnd = m_nFileLength;
-	//if (!HttpDownLoad(TEXT(""), 80, strHostAddr, nHostPort, strHttpAddr, strHttpFilename, strWriteFileName, false))
-	//// if (!HttpDownLoad(TEXT(""), 80, strHostAddr, nHostPort, strHttpAddr, strHttpFilename, strWriteFileName, nSectNum, false))
-	//	return FALSE;
-
-	return TRUE;
+	fclose(fpwrite);      // close file writing.
+	closesocket(hSocket); // close socket.
+	CHttpGet::m_nCount++; // increase counter.
+	return 0;
 }
 
 //---------------------------------------------------------------------------
@@ -158,74 +251,63 @@ SOCKET CHttpGet::ConnectHttp(CString strHostAddr, int nPort)
 	return hSocket;
 }
 
+// format and send http header.
 BOOL CHttpGet::SendHttpHeader(SOCKET hSocket, CString strHostAddr,
-	CString strHttpAddr, CString strHttpFilename, DWORD nPos)
-{ 
-	static CString sTemp;
+	CString strHttpAddr, CString strHttpFilename, DWORD nPos, DWORD nEnd)
+{
+	CString sTemp;
 	char cTmpBuffer[1024];
 
-	// Line1: file path
+	// Line1: path and version.
 	sTemp.Format("GET %s HTTP/1.1\r\n", strHttpAddr);
-	printf("%s",sTemp);
+
+	// Line2: host address.
+	sTemp.AppendFormat("Host: %s\r\n", strHostAddr);
+
+	// Line3: connection
+	sTemp.AppendFormat("Connection: keep-alive\r\n");
+
+	// Line4: file type.
+	sTemp.AppendFormat("Accept: */*\r\n");
+
+	// Line5: browser.
+	sTemp.AppendFormat("User-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36\r\n");
+
+	sTemp.AppendFormat("Accept - Encoding: gzip, deflate, sdch\r\nAccept-Language: zh-CN,zh;q=0.8,en-US;q=0.6,en;q=0.4\r\n");
+
+	// Line6: referer.
+	sTemp.AppendFormat("Referer: %s%s\r\n", strHostAddr, strHttpAddr);
+
+	// Line7: set content range.
+	if(nEnd != 0)
+	{
+		sTemp.AppendFormat("Range: bytes=%d-%d\r\n", nPos, nEnd);
+	}
+
+	// LastLine:
+	sTemp.AppendFormat("\r\n");
+
+	// printf("%s", sTemp);
+	// send http request.
 	if (!SocketSend(hSocket, sTemp)) return FALSE;
 
-	// Line2: host
-	sTemp.Format("Host: %s\r\n", strHostAddr);
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// Line3:connection
-	sTemp = "Connection: keep-alive\r\n";
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// Line4:data type.
-	sTemp.Format("Accept: */*\r\n");
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// Line5:browser type.
-	sTemp.Format("User-Agent: Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36\r\n");
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	//
-	sTemp = "Accept - Encoding: gzip, deflate, sdch\r\nAccept-Language: zh-CN,zh;q=0.8,en-US;q=0.6,en;q=0.4\r\n";
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// Line6:referer.
-	sTemp.Format("Referer: %s%s\r\n", strHostAddr,strHttpAddr);
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// Data Range.
-	// sTemp.Format("Range: bytes=%d-\r\n", nPos);
-	// if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// LastLine
-	sTemp.Format("\r\n");
-	printf("%s", sTemp);
-	if (!SocketSend(hSocket, sTemp)) return FALSE;
-
-	// get http header.
+	// get the returned http header.
 	int i = GetHttpHeader(hSocket, cTmpBuffer);
 	if (!i)
 	{
-		TRACE("获取HTTP头出错!\n");
-		return 0;
+		TRACE("Failed to get HTTP header!\n");
+		return FALSE;
 	}
 
-	// check header.
+	// check whether the file is available.
 	sTemp = cTmpBuffer;
-	printf("%s",sTemp);
+	// printf("%s", sTemp);
 	if (sTemp.Find("404") != -1) return FALSE;
 
-	// get the file size
-	m_nFileLength = GetFileLength(cTmpBuffer);
-	printf("%d\n", m_nFileLength);
-
-	TRACE(CString(cTmpBuffer).GetBuffer(200));
+	// get the content length.
+	if (nEnd == 0) {
+		m_nFileLength = GetFileLength(cTmpBuffer);
+	}
 
 	return TRUE;
 }
@@ -309,7 +391,7 @@ CDealSocket::CDealSocket()
 
 	err = WSAStartup(wVersionRequested, &wsaData);
 	if (err != 0) {
-		TRACE("WSAStartup failed:%d\n",err);
+		TRACE("WSAStartup failed:%d\n", err);
 		return;
 	}
 
@@ -326,6 +408,41 @@ CDealSocket::~CDealSocket()
 {
 	// terminates use of the Winsock 2 DLL (Ws2_32.dll).
 	WSACleanup();
+}
+
+//---------------------------------------------------------------------------
+CString CDealSocket::GetResponse(SOCKET hSock)
+{
+	char szBufferA[MAX_RECV_LEN];  	// ASCII string buffer. 
+	int	iReturn;					// return value of recv.
+
+	CString szError;
+	CString strPlus;
+	strPlus.Empty();
+
+	while (1)
+	{
+		// receive data from socket.
+		iReturn = recv(hSock, szBufferA, MAX_RECV_LEN, 0);
+		szBufferA[iReturn] = 0;
+		strPlus += szBufferA;
+
+		TRACE(szBufferA);
+
+		if (iReturn == SOCKET_ERROR)
+		{
+			szError.Format("No data is received, recv failed. Error: %d",
+				WSAGetLastError());
+			MessageBox(NULL, szError, TEXT("Client"), MB_OK);
+			break;
+		}
+		else if (iReturn<MAX_RECV_LEN) {
+			TRACE("Finished receiving data\n");
+			break;
+		}
+	}
+
+	return strPlus;
 }
 
 //---------------------------------------------------------------------------
@@ -383,4 +500,114 @@ SOCKET CDealSocket::GetConnect(CString host, int port)
 	}
 	freeaddrinfo(result);
 	return ConnectSocket;
+}
+
+//---------------------------------------------------------------------------
+SOCKET CDealSocket::Listening(int port)
+{
+	SOCKET ListenSocket = INVALID_SOCKET;	// listen to socket.
+	SOCKADDR_IN local_sin;				    // local socket address.
+
+	// setup TCP/IP socket.
+	if ((ListenSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET)
+	{
+		TRACE("Allocating socket failed. Error: %d\n", WSAGetLastError());
+		return INVALID_SOCKET;
+	}
+
+	// initialize socket address structure.
+	local_sin.sin_family = AF_INET;
+	local_sin.sin_port = htons(port);
+	local_sin.sin_addr.s_addr = htonl(INADDR_ANY);
+
+	// bind local address to listening socket.
+	if (bind(ListenSocket,
+		(struct sockaddr *) &local_sin,
+		sizeof(local_sin)) == SOCKET_ERROR)
+	{
+		TRACE("Binding socket failed. Error: %d\n", WSAGetLastError());
+		closesocket(ListenSocket);
+		return INVALID_SOCKET;
+	}
+
+	// listen to the connection.
+	if (listen(ListenSocket, MAX_PENDING_CONNECTS) == SOCKET_ERROR)
+	{
+		TRACE("Listening to the client failed. Error: %d\n",
+			WSAGetLastError());
+		closesocket(ListenSocket);
+		return INVALID_SOCKET;
+	}
+
+	return ListenSocket;
+}
+
+CMyFile myfile;
+
+//---------------------------------------------------------------------------
+CMyFile::CMyFile()
+{
+}
+
+//---------------------------------------------------------------------------
+CMyFile::~CMyFile()
+{
+}
+
+//---------------------------------------------------------------------------
+BOOL CMyFile::FileExists(LPCTSTR lpszFileName)
+{
+	DWORD dwAttributes = GetFileAttributes(lpszFileName);
+	if (dwAttributes == 0xFFFFFFFF)
+		return FALSE;
+
+	if ((dwAttributes & FILE_ATTRIBUTE_DIRECTORY)
+		== FILE_ATTRIBUTE_DIRECTORY)
+	{
+		return FALSE;
+	}
+	else {
+		return TRUE;
+	}
+}
+
+//---------------------------------------------------------------------------
+FILE* CMyFile::GetFilePointer(LPCTSTR lpszFileName)
+{
+	FILE *fp;
+	errno_t err;
+	if (FileExists(lpszFileName)) {
+		// open existing file.
+		err = fopen_s(&fp, lpszFileName, "r+b");
+	}
+	else {
+		// create a new file.
+		err = fopen_s(&fp, lpszFileName, "w+b");
+	}
+
+	return fp;
+}
+
+//---------------------------------------------------------------------------
+DWORD CMyFile::GetFileSizeByName(LPCTSTR lpszFileName)
+{
+	if (!FileExists(lpszFileName)) return 0;
+	struct _stat ST;
+	// get file length.
+	_stat(lpszFileName, &ST);
+	UINT nFilesize = ST.st_size;
+	return nFilesize;
+}
+
+//---------------------------------------------------------------------------
+// get file name from full path name.
+CString CMyFile::GetShortFileName(LPCSTR lpszFullPathName)
+{
+	CString strFileName = lpszFullPathName;
+	CString strShortName;
+	strFileName.TrimLeft();
+	strFileName.TrimRight();
+	int n = strFileName.ReverseFind('/');
+	strShortName = strFileName.Right(strFileName.GetLength() - n - 1);
+	return strShortName;
 }
