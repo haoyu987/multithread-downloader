@@ -1,22 +1,12 @@
-#include <afx.h>
-#include <afxwin.h>   
-#include "helper.h"
-#include <stdio.h>
-#include <iostream>
-
-using namespace std;
-
 // DownloadTest.cpp : The main entry point for the application.
 //
 #include <afx.h>
 #include <afxwin.h>   
 #include "MyDownload.h"
-
-#include <iostream>
-using namespace std;
-
 #include "helper.h"
+#include <iostream>
 
+using namespace std;
 
 UINT ThreadCount(void* pParam);
 
