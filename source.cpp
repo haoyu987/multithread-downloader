@@ -4,6 +4,7 @@
 #include <afxwin.h>   
 #include "MyDownload.h"
 #include "helper.h"
+#include <stdio.h>
 #include <iostream>
 
 using namespace std;
