@@ -19,7 +19,7 @@ public:
 	static void sleep(unsigned int delay);// sleep current thread for some specified time.
 
 protected:
-	virtual void * run(void * param) = 0;// call thread function.
+	virtual void * run(void *) = 0;// call thread function.
 
 private:
 	HANDLE threadHandle;
