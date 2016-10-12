@@ -80,5 +80,5 @@ void Thread::stop()
 
 void Thread::sleep(unsigned int delay)
 {
-	::Sleep(delay);
+	Sleep(delay);
 }
